@@ -1,25 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Browser, Page, sync_playwright
 
 from .config import AppConfig
 from .db import Database
 
 
+OUT_OF_STOCK_KEYWORDS = ["无货", "售罄", "缺货", "补货中"]
+IN_STOCK_KEYWORDS = ["立即购买", "加入购物车", "去结算", "有货", "马上抢"]
+
+
 @dataclass
-class ProductState:
-    product_key: str
-    category_name: Optional[str]
-    product_name: str
+class ProductSnapshot:
+    product_name: Optional[str]
     price_raw: Optional[str]
-    stock_count: int
-    stock_raw: str
+    availability: str
+    html_hash: str
     fetched_at: datetime
 
 
@@ -34,102 +37,67 @@ class ProductMonitor:
             page = browser.new_page()
             try:
                 while True:
-                    states = self._fetch_product_states(page)
-                    self._persist_changes(states)
+                    snapshot = self._fetch_snapshot(page)
+                    self._persist(snapshot)
                     time.sleep(self._config.poll_interval_seconds)
             finally:
                 browser.close()
 
-    def _fetch_product_states(self, page: Page) -> list[ProductState]:
+    def _fetch_snapshot(self, page: Page) -> ProductSnapshot:
         page.goto(self._config.product_url, wait_until="networkidle", timeout=60000)
 
-        all_states: list[ProductState] = []
-        tab_locator = page.locator(self._config.category_tab_selector)
-        tab_count = tab_locator.count()
+        full_text = page.inner_text("body")
+        product_name = self._first_text(page, self._config.name_selector)
+        price_text = self._first_text(page, self._config.price_selector)
+        availability_text = self._first_text(page, self._config.availability_selector)
 
-        if tab_count == 0:
-            all_states.extend(self._extract_cards(page, None))
-            return all_states
+        availability = self._resolve_availability(availability_text, full_text)
+        html_hash = hashlib.sha256(full_text.encode("utf-8", errors="ignore")).hexdigest()
 
-        for index in range(tab_count):
-            tab = tab_locator.nth(index)
-            category_name = tab.inner_text().strip() or f"tab_{index}"
-            tab.click()
-            page.wait_for_timeout(600)
-            all_states.extend(self._extract_cards(page, category_name))
+        return ProductSnapshot(
+            product_name=product_name,
+            price_raw=self._normalize_price(price_text),
+            availability=availability,
+            html_hash=html_hash,
+            fetched_at=datetime.now(),
+        )
 
-        dedup: dict[str, ProductState] = {}
-        for state in all_states:
-            dedup[state.product_key] = state
-        return list(dedup.values())
+    def _persist(self, snapshot: ProductSnapshot) -> None:
+        previous_availability = self._db.get_last_availability(self._config.product_id)
 
-    def _extract_cards(self, page: Page, category_name: Optional[str]) -> list[ProductState]:
-        states: list[ProductState] = []
-        cards = page.locator(self._config.product_card_selector)
+        snapshot_id = self._db.insert_snapshot(
+            product_url=self._config.product_url,
+            product_id=self._config.product_id,
+            product_name=snapshot.product_name,
+            price_raw=snapshot.price_raw,
+            availability=snapshot.availability,
+            html_hash=snapshot.html_hash,
+            fetched_at=snapshot.fetched_at,
+        )
 
-        for index in range(cards.count()):
-            card = cards.nth(index)
-            name = self._first_text_from(card, self._config.name_selector)
-            if not name:
-                continue
-
-            stock_raw = self._first_text_from(card, self._config.stock_selector)
-            stock_count = self._extract_int(stock_raw)
-            if stock_count is None:
-                continue
-
-            price_raw = self._first_text_from(card, self._config.price_selector)
-            product_key = f"{category_name or 'default'}::{name}"
-            states.append(
-                ProductState(
-                    product_key=product_key,
-                    category_name=category_name,
-                    product_name=name,
-                    price_raw=self._normalize_price(price_raw),
-                    stock_count=stock_count,
-                    stock_raw=stock_raw,
-                    fetched_at=datetime.now(),
-                )
-            )
-        return states
-
-    def _persist_changes(self, states: list[ProductState]) -> None:
-        if not states:
-            print("未抓取到商品卡片，请检查选择器配置。")
-            return
-
-        for state in states:
-            previous = self._db.get_last_stock_count(state.product_key)
-            if previous == state.stock_count:
-                print(f"[{state.fetched_at:%Y-%m-%d %H:%M:%S}] {state.product_name} 库存无变化: {state.stock_count}")
-                continue
-
-            snapshot_id = self._db.insert_snapshot(
-                product_key=state.product_key,
-                category_name=state.category_name,
-                product_name=state.product_name,
-                price_raw=state.price_raw,
-                stock_count=state.stock_count,
-                stock_raw=state.stock_raw,
-                fetched_at=state.fetched_at,
-            )
+        if previous_availability != snapshot.availability:
             self._db.insert_stock_event(
-                product_key=state.product_key,
-                previous_stock_count=previous,
-                current_stock_count=state.stock_count,
-                changed_at=state.fetched_at,
+                product_id=self._config.product_id,
+                previous_availability=previous_availability,
+                current_availability=snapshot.availability,
+                changed_at=snapshot.fetched_at,
                 snapshot_id=snapshot_id,
             )
             print(
-                f"[{state.fetched_at:%Y-%m-%d %H:%M:%S}] {state.product_name} 库存变化: "
-                f"{previous} -> {state.stock_count}, 价格: {state.price_raw or 'N/A'}"
+                f"[{snapshot.fetched_at:%Y-%m-%d %H:%M:%S}] 库存状态变化: "
+                f"{previous_availability} -> {snapshot.availability}"
+            )
+        else:
+            print(
+                f"[{snapshot.fetched_at:%Y-%m-%d %H:%M:%S}] 状态无变化: {snapshot.availability}; "
+                f"价格: {snapshot.price_raw or 'N/A'}"
             )
 
     @staticmethod
-    def _first_text_from(scope, selector_candidates: str) -> Optional[str]:
+    def _first_text(page: Page, selector_candidates: str) -> Optional[str]:
         selectors = [item.strip() for item in selector_candidates.split(",") if item.strip()]
         for selector in selectors:
-            loc = scope.locator(selector).first
+            loc = page.locator(selector).first
             if loc.count() > 0:
                 text = loc.inner_text(timeout=1000).strip()
                 if text:
@@ -137,16 +105,19 @@ class ProductMonitor:
         return None
 
     @staticmethod
-    def _extract_int(raw_text: Optional[str]) -> Optional[int]:
-        if not raw_text:
-            return None
-        match = re.search(r"(\d+)", raw_text)
-        return int(match.group(1)) if match else None
+    def _resolve_availability(availability_text: Optional[str], full_text: str) -> str:
+        text = (availability_text or "") + "\n" + full_text
+        for kw in OUT_OF_STOCK_KEYWORDS:
+            if kw in text:
+                return "OUT_OF_STOCK"
+        for kw in IN_STOCK_KEYWORDS:
+            if kw in text:
+                return "IN_STOCK"
+        return "UNKNOWN"
 
     @staticmethod
     def _normalize_price(price_text: Optional[str]) -> Optional[str]:
         if not price_text:
             return None
-        cleaned = price_text.replace(",", "")
-        matches = re.findall(r"\d+(?:\.\d+)?", cleaned)
+        matches = re.findall(r"\d+(?:\.\d+)?", price_text.replace(",", ""))
         return matches[0] if matches else price_text.strip()
