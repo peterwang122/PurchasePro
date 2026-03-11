@@ -23,47 +23,39 @@ class Database:
     def close(self) -> None:
         self._conn.close()
 
-    def get_last_availability(self, product_id: str) -> Optional[str]:
+    def get_last_stock_count(self, product_key: str) -> Optional[int]:
         query = """
-            SELECT availability
+            SELECT stock_count
             FROM product_snapshots
-            WHERE product_id = %s
+            WHERE product_key = %s
             ORDER BY fetched_at DESC
             LIMIT 1
         """
         with self._conn.cursor() as cur:
-            cur.execute(query, (product_id,))
+            cur.execute(query, (product_key,))
             row = cur.fetchone()
-        return row[0] if row else None
+        return int(row[0]) if row and row[0] is not None else None
 
     def insert_snapshot(
         self,
         *,
-        product_url: str,
-        product_id: str,
-        product_name: Optional[str],
+        product_key: str,
+        category_name: Optional[str],
+        product_name: str,
         price_raw: Optional[str],
-        availability: str,
-        html_hash: str,
+        stock_count: int,
+        stock_raw: str,
         fetched_at: datetime,
     ) -> int:
         query = """
             INSERT INTO product_snapshots
-            (product_url, product_id, product_name, price_raw, availability, html_hash, fetched_at)
+            (product_key, category_name, product_name, price_raw, stock_count, stock_raw, fetched_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 query,
-                (
-                    product_url,
-                    product_id,
-                    product_name,
-                    price_raw,
-                    availability,
-                    html_hash,
-                    fetched_at,
-                ),
+                (product_key, category_name, product_name, price_raw, stock_count, stock_raw, fetched_at),
             )
             snapshot_id = cur.lastrowid
         self._conn.commit()
@@ -72,26 +64,20 @@ class Database:
     def insert_stock_event(
         self,
         *,
-        product_id: str,
-        previous_availability: Optional[str],
-        current_availability: str,
+        product_key: str,
+        previous_stock_count: Optional[int],
+        current_stock_count: int,
         changed_at: datetime,
         snapshot_id: int,
     ) -> None:
         query = """
             INSERT INTO stock_events
-            (product_id, previous_availability, current_availability, changed_at, snapshot_id)
+            (product_key, previous_stock_count, current_stock_count, changed_at, snapshot_id)
             VALUES (%s, %s, %s, %s, %s)
         """
         with self._conn.cursor() as cur:
             cur.execute(
                 query,
-                (
-                    product_id,
-                    previous_availability,
-                    current_availability,
-                    changed_at,
-                    snapshot_id,
-                ),
+                (product_key, previous_stock_count, current_stock_count, changed_at, snapshot_id),
             )
         self._conn.commit()

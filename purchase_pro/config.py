@@ -14,12 +14,13 @@ class AppConfig:
     mysql_password: str
     mysql_database: str
     product_url: str
-    product_id: str
     poll_interval_seconds: int
     headless: bool
+    category_tab_selector: str
+    product_card_selector: str
     name_selector: str
     price_selector: str
-    availability_selector: str
+    stock_selector: str
 
 
 
@@ -40,11 +41,12 @@ def load_config() -> AppConfig:
         mysql_user=_require_env("MYSQL_USER"),
         mysql_password=_require_env("MYSQL_PASSWORD"),
         mysql_database=_require_env("MYSQL_DATABASE"),
-        product_url=_require_env("PRODUCT_URL"),
-        product_id=_require_env("PRODUCT_ID"),
+        product_url=os.getenv("PRODUCT_URL", "https://rtjgfsc.rtjzj.com/pages/tabBar/shop/shop"),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "5")),
         headless=os.getenv("HEADLESS", "true").lower() == "true",
-        name_selector=os.getenv("NAME_SELECTOR", "h1"),
-        price_selector=os.getenv("PRICE_SELECTOR", "[class*='price']"),
-        availability_selector=os.getenv("AVAILABILITY_SELECTOR", "button"),
+        category_tab_selector=os.getenv("CATEGORY_TAB_SELECTOR", ".tab-item, .category-item"),
+        product_card_selector=os.getenv("PRODUCT_CARD_SELECTOR", ".goods-item, .product-item, .item"),
+        name_selector=os.getenv("NAME_SELECTOR", ".goods-name, .product-name, .title"),
+        price_selector=os.getenv("PRICE_SELECTOR", ".price, .goods-price, [class*='price']"),
+        stock_selector=os.getenv("STOCK_SELECTOR", ".stock, .inventory, [class*='stock'], [class*='inventory']"),
     )
