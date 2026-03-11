@@ -50,7 +50,7 @@ def load_config() -> AppConfig:
         product_url=os.getenv("PRODUCT_URL", "https://rtjgfsc.rtjzj.com/pages/tabBar/shop/shop"),
         poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "5")),
         headless=os.getenv("HEADLESS", "true").lower() == "true",
-        category_names=_parse_csv(os.getenv("CATEGORY_NAMES", "推荐,黄金,白银,铂金")),
+        category_names=_parse_csv(os.getenv("CATEGORY_NAMES", "推荐分类,黄金,白银,铂金")),
         category_tab_selector=os.getenv("CATEGORY_TAB_SELECTOR", "[class*='tab'], [class*='category']"),
         product_card_selector=os.getenv("PRODUCT_CARD_SELECTOR", "[class*='goods'], [class*='product'], [class*='item']"),
         name_selector=os.getenv("NAME_SELECTOR", "[class*='name'], [class*='title']"),

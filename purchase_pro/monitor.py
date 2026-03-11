@@ -56,12 +56,16 @@ class ProductMonitor:
                 continue
 
             json_states = self._extract_from_embedded_json(page, category_name)
-            all_states.extend(json_states)
+            if json_states:
+                all_states.extend(json_states)
+                continue
+
+            all_states.extend(self._extract_from_full_text(page, category_name))
 
         if not all_states:
-            # 全局兜底，至少把推荐页内容抓一遍
-            all_states.extend(self._extract_cards(page, "推荐"))
-            all_states.extend(self._extract_from_embedded_json(page, "推荐"))
+            all_states.extend(self._extract_cards(page, "推荐分类"))
+            all_states.extend(self._extract_from_embedded_json(page, "推荐分类"))
+            all_states.extend(self._extract_from_full_text(page, "推荐分类"))
 
         dedup: dict[str, ProductState] = {}
         for state in all_states:
@@ -72,7 +76,7 @@ class ProductMonitor:
         by_text = page.get_by_text(category_name, exact=False)
         count = by_text.count()
         if count > 0:
-            for i in range(min(count, 5)):
+            for i in range(min(count, 8)):
                 loc = by_text.nth(i)
                 try:
                     if loc.is_visible(timeout=300):
@@ -84,11 +88,11 @@ class ProductMonitor:
                     continue
 
         tabs = page.locator(self._config.category_tab_selector)
-        for i in range(min(tabs.count(), 20)):
+        for i in range(min(tabs.count(), 30)):
             tab = tabs.nth(i)
             try:
                 txt = tab.inner_text(timeout=300).strip()
-                if category_name in txt:
+                if category_name in txt or txt in category_name:
                     tab.click(timeout=1500)
                     return
             except Exception:
@@ -162,6 +166,39 @@ class ProductMonitor:
                         fetched_at=fetched_at,
                     )
                 )
+        return states
+
+    def _extract_from_full_text(self, page: Page, category_name: str) -> list[ProductState]:
+        full_text = page.inner_text("body")
+        lines = [line.strip() for line in full_text.splitlines() if line.strip()]
+        states: list[ProductState] = []
+
+        for i, line in enumerate(lines):
+            if not self._looks_like_product_name(line):
+                continue
+            stock_idx = self._find_next_stock_line_index(lines, i + 1)
+            if stock_idx is None:
+                continue
+
+            stock_raw = lines[stock_idx]
+            stock_count = self._extract_int(stock_raw)
+            if stock_count is None:
+                continue
+
+            price_raw = self._find_product_price(lines, stock_idx + 1)
+            fetched_at = datetime.now()
+            states.append(
+                ProductState(
+                    product_key=f"{category_name}::{line}",
+                    category_name=category_name,
+                    product_name=line,
+                    price_raw=price_raw,
+                    stock_count=stock_count,
+                    stock_raw=stock_raw,
+                    fetched_at=fetched_at,
+                )
+            )
+
         return states
 
     def _persist_changes(self, states: list[ProductState]) -> None:
@@ -251,7 +288,33 @@ class ProductMonitor:
             return None
         cleaned = str(price_text).replace(",", "")
         matches = re.findall(r"\d+(?:\.\d+)?", cleaned)
-        return matches[0] if matches else str(price_text).strip()
+        return matches[-1] if matches else str(price_text).strip()
+
+    @staticmethod
+    def _looks_like_product_name(line: str) -> bool:
+        return line.startswith("融通金") or "金条" in line or "银条" in line or "铂" in line
+
+    @staticmethod
+    def _find_next_stock_line_index(lines: list[str], start_idx: int) -> Optional[int]:
+        for idx in range(start_idx, min(start_idx + 30, len(lines))):
+            if re.search(r"库存\s*\d+", lines[idx]):
+                return idx
+        return None
+
+    def _find_product_price(self, lines: list[str], start_idx: int) -> Optional[str]:
+        candidates: list[float] = []
+        for idx in range(start_idx, min(start_idx + 40, len(lines))):
+            line = lines[idx]
+            if self._looks_like_product_name(line):
+                break
+            for token in re.findall(r"\d+(?:\.\d+)?", line.replace(",", "")):
+                try:
+                    candidates.append(float(token))
+                except ValueError:
+                    continue
+        if not candidates:
+            return None
+        return f"{max(candidates):.2f}"
 
     def _walk_items(self, data: Any) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

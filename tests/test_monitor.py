@@ -24,7 +24,15 @@ class FakeDB:
 class FakeConfig:
     headless = True
     poll_interval_seconds = 1
-    category_names = ("推荐", "黄金", "白银", "铂金")
+    category_names = ("推荐分类", "黄金", "白银", "铂金")
+
+
+class FakePage:
+    def __init__(self, text):
+        self.text = text
+
+    def inner_text(self, _selector):
+        return self.text
 
 
 class MonitorTests(unittest.TestCase):
@@ -44,6 +52,28 @@ class MonitorTests(unittest.TestCase):
         items = monitor._walk_items(data)
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["goodsName"], "A")
+
+    def test_extract_from_full_text(self):
+        full_text = """推荐分类
+融通金【黄金原料金条Au9999】50克
+库存8
+工费
+￥
+3.50
+/g
+￥
+61820.00
+融通金【黄金原料金条Au9999】200克
+库存0
+￥
+247250.00
+"""
+        monitor = ProductMonitor(FakeConfig(), FakeDB())
+        states = monitor._extract_from_full_text(FakePage(full_text), "推荐分类")
+        self.assertEqual(len(states), 2)
+        self.assertEqual(states[0].product_name, "融通金【黄金原料金条Au9999】50克")
+        self.assertEqual(states[0].stock_count, 8)
+        self.assertEqual(states[0].price_raw, "61820.00")
 
     def test_persist_changes_only_on_stock_change(self):
         db = FakeDB(previous={"cat::A": 10})
