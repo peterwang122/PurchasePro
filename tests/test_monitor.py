@@ -75,6 +75,30 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(states[0].stock_count, 8)
         self.assertEqual(states[0].price_raw, "61820.00")
 
+    def test_extract_from_full_text_ignores_non_rongtongjin_and_handles_silver_price(self):
+        full_text = """推荐分类
+黄金金条
+库存99
+￥
+999999.00
+融通金【白银原料Ag9999】1000克
+库存12
+工费
+￥
+1.20
+/g
+销量
+9999
+￥
+8123.00
+"""
+        monitor = ProductMonitor(FakeConfig(), FakeDB())
+        states = monitor._extract_from_full_text(FakePage(full_text), "推荐分类")
+        self.assertEqual(len(states), 1)
+        self.assertEqual(states[0].product_name, "融通金【白银原料Ag9999】1000克")
+        self.assertEqual(states[0].stock_count, 12)
+        self.assertEqual(states[0].price_raw, "8123.00")
+
     def test_persist_changes_only_on_stock_change(self):
         db = FakeDB(previous={"cat::A": 10})
         monitor = ProductMonitor(FakeConfig(), db)

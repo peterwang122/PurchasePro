@@ -292,7 +292,7 @@ class ProductMonitor:
 
     @staticmethod
     def _looks_like_product_name(line: str) -> bool:
-        return line.startswith("融通金") or "金条" in line or "银条" in line or "铂" in line
+        return line.startswith("融通金")
 
     @staticmethod
     def _find_next_stock_line_index(lines: list[str], start_idx: int) -> Optional[int]:
@@ -302,19 +302,59 @@ class ProductMonitor:
         return None
 
     def _find_product_price(self, lines: list[str], start_idx: int) -> Optional[str]:
-        candidates: list[float] = []
+        block = self._slice_product_block(lines, start_idx)
+
+        marked_prices: list[float] = []
+        for idx, line in enumerate(block):
+            value = self._extract_price_after_currency(block, idx)
+            if value is not None:
+                marked_prices.append(value)
+        if marked_prices:
+            return f"{marked_prices[-1]:.2f}"
+
+        decimal_candidates: list[float] = []
+        for line in block:
+            for token in re.findall(r"\d+\.\d+", line.replace(",", "")):
+                try:
+                    decimal_candidates.append(float(token))
+                except ValueError:
+                    continue
+        if decimal_candidates:
+            return f"{decimal_candidates[-1]:.2f}"
+
+        return None
+
+    def _slice_product_block(self, lines: list[str], start_idx: int) -> list[str]:
+        block: list[str] = []
         for idx in range(start_idx, min(start_idx + 40, len(lines))):
             line = lines[idx]
             if self._looks_like_product_name(line):
                 break
-            for token in re.findall(r"\d+(?:\.\d+)?", line.replace(",", "")):
-                try:
-                    candidates.append(float(token))
-                except ValueError:
-                    continue
-        if not candidates:
+            block.append(line)
+        return block
+
+    @staticmethod
+    def _extract_price_after_currency(lines: list[str], idx: int) -> Optional[float]:
+        line = lines[idx].strip()
+        if "￥" not in line and "¥" not in line:
             return None
-        return f"{max(candidates):.2f}"
+
+        tokens = re.findall(r"\d+(?:\.\d+)?", line.replace(",", ""))
+        if tokens:
+            try:
+                return float(tokens[-1])
+            except ValueError:
+                return None
+
+        if idx + 1 < len(lines):
+            nxt = lines[idx + 1].strip()
+            nxt_tokens = re.findall(r"\d+(?:\.\d+)?", nxt.replace(",", ""))
+            if nxt_tokens:
+                try:
+                    return float(nxt_tokens[-1])
+                except ValueError:
+                    return None
+        return None
 
     def _walk_items(self, data: Any) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
