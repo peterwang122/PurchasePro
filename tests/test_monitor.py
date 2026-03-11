@@ -24,6 +24,7 @@ class FakeDB:
 class FakeConfig:
     headless = True
     poll_interval_seconds = 1
+    category_names = ("推荐", "黄金", "白银", "铂金")
 
 
 class MonitorTests(unittest.TestCase):
@@ -36,6 +37,13 @@ class MonitorTests(unittest.TestCase):
         self.assertEqual(ProductMonitor._normalize_price("¥ 6,123.50"), "6123.50")
         self.assertEqual(ProductMonitor._normalize_price("未标价"), "未标价")
         self.assertIsNone(ProductMonitor._normalize_price(None))
+
+    def test_walk_items_detects_product_nodes(self):
+        monitor = ProductMonitor(FakeConfig(), FakeDB())
+        data = {"data": [{"goodsName": "A", "stock": 10, "price": "100"}, {"foo": "bar"}]}
+        items = monitor._walk_items(data)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["goodsName"], "A")
 
     def test_persist_changes_only_on_stock_change(self):
         db = FakeDB(previous={"cat::A": 10})

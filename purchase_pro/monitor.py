@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
 from .config import AppConfig
 from .db import Database
@@ -41,44 +42,79 @@ class ProductMonitor:
                 browser.close()
 
     def _fetch_product_states(self, page: Page) -> list[ProductState]:
-        page.goto(self._config.product_url, wait_until="networkidle", timeout=60000)
+        page.goto(self._config.product_url, wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(1500)
 
         all_states: list[ProductState] = []
-        tab_locator = page.locator(self._config.category_tab_selector)
-        tab_count = tab_locator.count()
+        for category_name in self._config.category_names:
+            self._click_category(page, category_name)
+            page.wait_for_timeout(800)
 
-        if tab_count == 0:
-            all_states.extend(self._extract_cards(page, None))
-            return all_states
+            dom_states = self._extract_cards(page, category_name)
+            if dom_states:
+                all_states.extend(dom_states)
+                continue
 
-        for index in range(tab_count):
-            tab = tab_locator.nth(index)
-            category_name = tab.inner_text().strip() or f"tab_{index}"
-            tab.click()
-            page.wait_for_timeout(600)
-            all_states.extend(self._extract_cards(page, category_name))
+            json_states = self._extract_from_embedded_json(page, category_name)
+            all_states.extend(json_states)
+
+        if not all_states:
+            # 全局兜底，至少把推荐页内容抓一遍
+            all_states.extend(self._extract_cards(page, "推荐"))
+            all_states.extend(self._extract_from_embedded_json(page, "推荐"))
 
         dedup: dict[str, ProductState] = {}
         for state in all_states:
             dedup[state.product_key] = state
         return list(dedup.values())
 
+    def _click_category(self, page: Page, category_name: str) -> None:
+        by_text = page.get_by_text(category_name, exact=False)
+        count = by_text.count()
+        if count > 0:
+            for i in range(min(count, 5)):
+                loc = by_text.nth(i)
+                try:
+                    if loc.is_visible(timeout=300):
+                        loc.click(timeout=1500)
+                        return
+                except PlaywrightTimeoutError:
+                    continue
+                except Exception:
+                    continue
+
+        tabs = page.locator(self._config.category_tab_selector)
+        for i in range(min(tabs.count(), 20)):
+            tab = tabs.nth(i)
+            try:
+                txt = tab.inner_text(timeout=300).strip()
+                if category_name in txt:
+                    tab.click(timeout=1500)
+                    return
+            except Exception:
+                continue
+
     def _extract_cards(self, page: Page, category_name: Optional[str]) -> list[ProductState]:
         states: list[ProductState] = []
         cards = page.locator(self._config.product_card_selector)
 
-        for index in range(cards.count()):
+        for index in range(min(cards.count(), 300)):
             card = cards.nth(index)
-            name = self._first_text_from(card, self._config.name_selector)
+            card_text = self._safe_text(card)
+            if not card_text or len(card_text) < 2:
+                continue
+
+            name = self._first_text_from(card, self._config.name_selector) or self._guess_name(card_text)
             if not name:
                 continue
 
-            stock_raw = self._first_text_from(card, self._config.stock_selector)
+            stock_raw = self._first_text_from(card, self._config.stock_selector) or self._find_stock_text(card_text)
             stock_count = self._extract_int(stock_raw)
             if stock_count is None:
                 continue
 
-            price_raw = self._first_text_from(card, self._config.price_selector)
+            price_raw = self._first_text_from(card, self._config.price_selector) or self._find_price_text(card_text)
+            fetched_at = datetime.now()
             product_key = f"{category_name or 'default'}::{name}"
             states.append(
                 ProductState(
@@ -88,14 +124,49 @@ class ProductMonitor:
                     price_raw=self._normalize_price(price_raw),
                     stock_count=stock_count,
                     stock_raw=stock_raw,
-                    fetched_at=datetime.now(),
+                    fetched_at=fetched_at,
                 )
             )
         return states
 
+    def _extract_from_embedded_json(self, page: Page, category_name: str) -> list[ProductState]:
+        html = page.content()
+        states: list[ProductState] = []
+
+        for payload in re.findall(r"\{.*?\}", html, flags=re.S):
+            if "库存" not in payload and "stock" not in payload.lower():
+                continue
+            try:
+                data = json.loads(payload)
+            except Exception:
+                continue
+            for item in self._walk_items(data):
+                name = self._pick_text(item, ["goodsName", "productName", "name", "title"])
+                stock_value = self._pick_text(item, ["stock", "stockNum", "inventory", "quantity"])
+                if not name or stock_value is None:
+                    continue
+                stock_raw = f"库存{stock_value}"
+                stock_count = self._extract_int(str(stock_value))
+                if stock_count is None:
+                    continue
+                price_raw = self._pick_text(item, ["price", "salePrice", "currentPrice"])
+                fetched_at = datetime.now()
+                states.append(
+                    ProductState(
+                        product_key=f"{category_name}::{name}",
+                        category_name=category_name,
+                        product_name=name,
+                        price_raw=self._normalize_price(str(price_raw) if price_raw is not None else None),
+                        stock_count=stock_count,
+                        stock_raw=stock_raw,
+                        fetched_at=fetched_at,
+                    )
+                )
+        return states
+
     def _persist_changes(self, states: list[ProductState]) -> None:
         if not states:
-            print("未抓取到商品卡片，请检查选择器配置。")
+            print("未抓取到商品卡片或库存信息，请检查分类按钮和选择器配置。")
             return
 
         for state in states:
@@ -121,32 +192,97 @@ class ProductMonitor:
                 snapshot_id=snapshot_id,
             )
             print(
-                f"[{state.fetched_at:%Y-%m-%d %H:%M:%S}] {state.product_name} 库存变化: "
+                f"[{state.fetched_at:%Y-%m-%d %H:%M:%S}] {state.category_name or '默认'} / {state.product_name} 库存变化: "
                 f"{previous} -> {state.stock_count}, 价格: {state.price_raw or 'N/A'}"
             )
 
     @staticmethod
-    def _first_text_from(scope, selector_candidates: str) -> Optional[str]:
+    def _first_text_from(scope: Any, selector_candidates: str) -> Optional[str]:
         selectors = [item.strip() for item in selector_candidates.split(",") if item.strip()]
         for selector in selectors:
-            loc = scope.locator(selector).first
-            if loc.count() > 0:
-                text = loc.inner_text(timeout=1000).strip()
-                if text:
-                    return text
+            try:
+                loc = scope.locator(selector).first
+                if loc.count() > 0:
+                    text = loc.inner_text(timeout=500).strip()
+                    if text:
+                        return text
+            except Exception:
+                continue
         return None
+
+    @staticmethod
+    def _safe_text(scope: Any) -> Optional[str]:
+        try:
+            text = scope.inner_text(timeout=300)
+            return text.strip() if text else None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _guess_name(card_text: str) -> Optional[str]:
+        for line in [item.strip() for item in card_text.splitlines() if item.strip()]:
+            if "库存" in line or "¥" in line or "$" in line:
+                continue
+            if re.search(r"\d+", line) and len(line) <= 3:
+                continue
+            return line
+        return None
+
+    @staticmethod
+    def _find_stock_text(card_text: str) -> Optional[str]:
+        m = re.search(r"(库存\s*[:：]?\s*\d+)", card_text)
+        return m.group(1) if m else None
+
+    @staticmethod
+    def _find_price_text(card_text: str) -> Optional[str]:
+        m = re.search(r"([¥￥]?\s*\d+(?:,\d{3})*(?:\.\d+)?)", card_text)
+        return m.group(1) if m else None
 
     @staticmethod
     def _extract_int(raw_text: Optional[str]) -> Optional[int]:
         if not raw_text:
             return None
-        match = re.search(r"(\d+)", raw_text)
+        match = re.search(r"(\d+)", str(raw_text))
         return int(match.group(1)) if match else None
 
     @staticmethod
     def _normalize_price(price_text: Optional[str]) -> Optional[str]:
         if not price_text:
             return None
-        cleaned = price_text.replace(",", "")
+        cleaned = str(price_text).replace(",", "")
         matches = re.findall(r"\d+(?:\.\d+)?", cleaned)
-        return matches[0] if matches else price_text.strip()
+        return matches[0] if matches else str(price_text).strip()
+
+    def _walk_items(self, data: Any) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+
+        def _walk(node: Any) -> None:
+            if isinstance(node, dict):
+                if self._looks_like_product(node):
+                    items.append(node)
+                for value in node.values():
+                    _walk(value)
+            elif isinstance(node, list):
+                for value in node:
+                    _walk(value)
+
+        _walk(data)
+        return items
+
+    @staticmethod
+    def _looks_like_product(node: dict[str, Any]) -> bool:
+        keys = {k.lower() for k in node.keys()}
+        has_name = any(k in keys for k in ["goodsname", "productname", "name", "title"])
+        has_stock = any(k in keys for k in ["stock", "stocknum", "inventory", "quantity"])
+        return has_name and has_stock
+
+    @staticmethod
+    def _pick_text(node: dict[str, Any], keys: list[str]) -> Optional[str]:
+        lowered = {k.lower(): v for k, v in node.items()}
+        for key in keys:
+            value = lowered.get(key.lower())
+            if value is None:
+                continue
+            if isinstance(value, (int, float, str)):
+                return str(value)
+        return None
